@@ -65,7 +65,6 @@ function mergeSheets(trips: any[], checkedIn: any[], demographics: any[]) {
     const userDemo = demographicsData.find(
       (d) => d.User_ID === trip.checkedInUserID
     );
-    console.log("Trip:", trip);
     return { ...trip, Age: userDemo ? userDemo.Age : null };
   });
 }
@@ -109,7 +108,6 @@ app.post(
       }
       // Parse workbook
       const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
-      console.log(workbook.SheetNames);
       const trips = readSheetCaseInsensitive(workbook, "Trip Data") as Trip[];
       const riders = readSheetCaseInsensitive(
         workbook,
@@ -122,29 +120,6 @@ app.post(
       ) as UserAge[];
 
       enrichedData = mergeSheets(trips, riders, userAge);
-      // let count = 0;
-      // --- Convert Trip Date to Date and Epoch ---
-      // enrichedData = enrichedData.map((trip) => {
-      //   let tripDateObj: Date | null = null;
-
-      //   const val = trip["Trip_Date_and_Time"];
-      //   if (val !== undefined && val !== null) {
-      //     if (typeof val === "number") {
-      //       tripDateObj = excelDateToJSDate(val);
-      //     } else {
-      //       tripDateObj = new Date(val); // fallback for proper string dates
-      //     }
-      //   }
-
-      //   const TripDateISO = tripDateObj ? tripDateObj.toISOString() : null;
-      //   const TripEpoch = tripDateObj ? tripDateObj.getTime() : null;
-      //   console.log({ ...trip, TripDateISO, TripEpoch });
-      //   return {
-      //     ...trip,
-      //     TripDateISO,
-      //     TripEpoch,
-      //   };
-      // });
 
       enrichedData = enrichedData.map((trip) => {
         const val = trip["Trip_Date_and_Time"];
@@ -166,7 +141,6 @@ app.post(
           TripHour: tripDate?.getHours() || null,
         };
       });
-      // console.log("Found NaN date", count);
       vectorStore = await createVectorStore(enrichedData);
 
       res.json({
@@ -189,97 +163,6 @@ function getUserHistory(userId: string): ChatMessageHistory {
   }
   return userHistories.get(userId)!;
 }
-
-// --- /chat2 route ---
-// app.post("/chat2", async (req, res) => {
-//   try {
-//     if (!vectorStore)
-//       return res.status(400).json({ error: "No data uploaded yet" });
-
-//     const { question, userId } = req.body;
-//     if (!question || !userId)
-//       return res
-//         .status(400)
-//         .json({ error: "Both question and userId are required" });
-
-//     // --- Optional pre-filter example ---
-//     let filteredData = enrichedData;
-//     if (/age\s*18-24/i.test(question)) {
-//       filteredData = enrichedData.filter((d) => d.Age >= 18 && d.Age <= 24);
-//     }
-
-//     // --- Recreate vector store if filtered ---
-//     const filteredVectorStore = await createVectorStore(filteredData);
-
-//     // --- Load user's chat history ---
-//     const history = getUserHistory(userId);
-
-//     // --- Memory for ConversationChain ---
-//     const memory = new BufferMemory({
-//       memoryKey: "history",
-//       inputKey: "input",
-//       outputKey: "response",
-//       chatHistory: history,
-//     });
-
-//     // --- Create ConversationChain with Gemini ---
-//     const chain = new ConversationChain({
-//       llm: new ChatGoogleGenerativeAI({
-//         model: "gemini-1.5-flash",
-//         apiKey: process.env.GEMINI_API_KEY,
-//         temperature: 0,
-//       }),
-//       memory,
-//       outputKey: "response",
-//     });
-
-//     // --- Retrieve relevant docs ---
-//     const retriever = filteredVectorStore.asRetriever();
-//     const relevantDocs = await retriever.getRelevantDocuments(question);
-
-//     // --- Build context from retrieved docs ---
-//     const contextText = relevantDocs
-//       .map((d) => JSON.stringify(d.metadata || d.pageContent))
-//       .join("\n");
-
-//     const finalInput = `${contextText}\n\nUser question: ${question}`;
-// const prompt = new PromptTemplate({
-//       template: `
-// You are an expert assistant analyzing trip data.
-// Each trip has the following fields: Trip_ID, Pick_Up_Latitude, Pick_Up_Longitude,
-// Drop_Off_Latitude, Drop_Off_Longitude, Pick_Up_Address, Drop_Off_Address,
-// TripDateISO, TripEpoch, Total_Passengers, Age, and checkedInUserID.
-
-// Use the context below to answer the user's question accurately.
-// Do not make assumptions outside the given data.
-
-// Context:
-// {context}
-
-// Question: {question}
-
-// Answer:
-//       `,
-//       inputVariables: ["context", "question"],
-//     });
-
-//     const finalPrompt = await prompt.format({
-//       context: contextText,
-//       question,
-//     });
-//     // --- Call chain ---
-//     const response = await chain.call({ input: finalInput });
-
-//     // --- Persist latest Q&A to user history ---
-//     history.addUserMessage(question);
-//     history.addAIMessage(response.response);
-
-//     res.json({ answer: response.response });
-//   } catch (err) {
-//     console.error("Error in /chat2:", err);
-//     res.status(500).json({ error: "Something went wrong" });
-//   }
-// });
 
 app.post("/chat2", async (req, res) => {
   try {
@@ -315,45 +198,13 @@ app.post("/chat2", async (req, res) => {
     });
 
     // --- Retrieve relevant docs ---
-    const retriever = vectorStore!.asRetriever();
+    const retriever = vectorStore!.asRetriever({ k: 20 });
     const relevantDocs = await retriever.getRelevantDocuments(question);
 
     // --- Build context from retrieved docs ---
     const contextText = relevantDocs
       .map((d) => JSON.stringify(d.metadata || d.pageContent))
       .join("\n");
-    const currentDate = new Date().toISOString(); // current date in ISO
-
-    // --- Prompt Template ---
-    //     const prompt = new PromptTemplate({
-    //       template: `
-    // You are an expert assistant analyzing trip data.
-    // Each trip has the following fields: Trip_ID, Pick_Up_Latitude, Pick_Up_Longitude,
-    // Drop_Off_Latitude, Drop_Off_Longitude, Pick_Up_Address, Drop_Off_Address,
-    // TripDateISO, TripEpoch, Total_Passengers, Age, and checkedInUserID.
-
-    // Use the context below to answer the user's question accurately.
-    // Do not make assumptions outside the given data.
-    // Use the Current date: ${currentDate} so that you can answer questions for last month or laste week, etc.
-    // Context:
-    // {context}
-
-    // Question: {question}
-    //       `,
-    //       inputVariables: ["context", "question"],
-    //     });
-
-    //     const finalPrompt = await prompt.format({
-    //       context: contextText,
-    //       question,
-    //     });
-
-    // const tableText = relevantDocs
-    //   .map((d) => {
-    //     const m = d.metadata;
-    //     return `Trip_ID: ${m.Trip_ID} | Drop_Off_Address: ${m.Drop_Off_Address} | Pick_Up_Address: ${m.Pick_Up_Address} | Age: ${m.Age} | Total_Passengers: ${m.Total_Passengers} | TripDayOfWeek: ${m.TripDayOfWeek} | TripHour: ${m.TripHour}`;
-    //   })
-    //   .join("\n");
 
     // --- Include current date for reference ---
     const prompt = `You are an AI assistant with trip data. Today's date is ${new Date().toISOString()}.
