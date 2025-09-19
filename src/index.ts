@@ -5,17 +5,23 @@ import {
 import cors from "cors";
 import dotenv from "dotenv";
 import express, { Request, Response } from "express";
+import fs from "fs";
 import { ConversationChain } from "langchain/chains";
 import { Document } from "langchain/document";
 import { BufferMemory, ChatMessageHistory } from "langchain/memory";
 import { MemoryVectorStore } from "langchain/vectorstores/memory";
 import multer from "multer";
-import XLSX from "xlsx";
+import path from "path";
+import XLSX, { WorkBook } from "xlsx";
 import { Rider, Trip, UserAge } from "./interfaces/interface";
+import { authenticate } from "./middleware/auth";
 
 dotenv.config();
 
-const PORT = process.env.PORT ? parseInt(process.env.PORT) : 4000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8080;
+const BASE_URL = process.env.BASE_URL
+  ? process.env.BASE_URL
+  : "http://localhost";
 
 const app = express();
 app.use(cors());
@@ -69,12 +75,6 @@ function mergeSheets(trips: any[], checkedIn: any[], demographics: any[]) {
   });
 }
 
-// /** Utility: convert JS array to CSV stream */
-// function convertToCSVStream(data: any[]) {
-//   const csvString = Papa.unparse(data);
-//   return Readable.from([csvString]);
-// }
-
 /** Utility: create vector store */
 async function createVectorStore(data: any[]) {
   const docs = data.map((row) => {
@@ -98,8 +98,67 @@ function excelDateToJSDate(serial: number): Date {
   return new Date((serial - 25569) * 86400 * 1000);
 }
 
+const EXCEL_FILE_PATH = path.join(__dirname, "./data/FetiiAI_Data_Austin.xlsx");
+
+async function loadExcelOnStart() {
+  try {
+    if (fs.existsSync(EXCEL_FILE_PATH)) {
+      const fileBuffer = fs.readFileSync(EXCEL_FILE_PATH);
+      const workbook = XLSX.read(fileBuffer, { type: "buffer" });
+      await createVectorStoreFromExcel(workbook);
+      console.log(`✅ Excel file loaded with ${enrichedData.length} rows`);
+    } else {
+      console.warn("⚠️ Excel file not found:", EXCEL_FILE_PATH);
+    }
+  } catch (err) {
+    console.error("❌ Error loading Excel on start:", err);
+  }
+}
+
+app.listen(PORT, async () => {
+  console.log(`Backend listening at http://localhost:${PORT}`);
+  await loadExcelOnStart(); // auto-load when server starts
+});
+const createVectorStoreFromExcel = async (workbook: WorkBook) => {
+  const trips = readSheetCaseInsensitive(workbook, "Trip Data") as Trip[];
+  const riders = readSheetCaseInsensitive(
+    workbook,
+    "Checked in User ID's"
+  ) as Rider[];
+
+  const userAge = readSheetCaseInsensitive(
+    workbook,
+    "Customer Demographics"
+  ) as UserAge[];
+
+  enrichedData = mergeSheets(trips, riders, userAge);
+
+  enrichedData = enrichedData.map((trip) => {
+    const val = trip["Trip_Date_and_Time"];
+    let tripDate: Date | null = null;
+
+    if (val !== undefined && val !== null) {
+      tripDate =
+        typeof val === "number" ? excelDateToJSDate(val) : new Date(val);
+    }
+
+    return {
+      ...trip,
+      TripDateISO: tripDate?.toISOString() || null,
+      TripEpoch: tripDate?.getTime() || null,
+      TripYear: tripDate?.getFullYear() || null,
+      TripMonth: tripDate ? tripDate.getMonth() + 1 : null,
+      TripDay: tripDate?.getDate() || null,
+      TripDayOfWeek: tripDate?.getDay() || null, // 0=Sun, 6=Sat
+      TripHour: tripDate?.getHours() || null,
+    };
+  });
+  vectorStore = await createVectorStore(enrichedData);
+};
+
 app.post(
   "/upload",
+  authenticate,
   upload.single("file"),
   async (req: Request, res: Response) => {
     try {
@@ -108,41 +167,7 @@ app.post(
       }
       // Parse workbook
       const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
-      const trips = readSheetCaseInsensitive(workbook, "Trip Data") as Trip[];
-      const riders = readSheetCaseInsensitive(
-        workbook,
-        "Checked in User ID's"
-      ) as Rider[];
-
-      const userAge = readSheetCaseInsensitive(
-        workbook,
-        "Customer Demographics"
-      ) as UserAge[];
-
-      enrichedData = mergeSheets(trips, riders, userAge);
-
-      enrichedData = enrichedData.map((trip) => {
-        const val = trip["Trip_Date_and_Time"];
-        let tripDate: Date | null = null;
-
-        if (val !== undefined && val !== null) {
-          tripDate =
-            typeof val === "number" ? excelDateToJSDate(val) : new Date(val);
-        }
-
-        return {
-          ...trip,
-          TripDateISO: tripDate?.toISOString() || null,
-          TripEpoch: tripDate?.getTime() || null,
-          TripYear: tripDate?.getFullYear() || null,
-          TripMonth: tripDate ? tripDate.getMonth() + 1 : null,
-          TripDay: tripDate?.getDate() || null,
-          TripDayOfWeek: tripDate?.getDay() || null, // 0=Sun, 6=Sat
-          TripHour: tripDate?.getHours() || null,
-        };
-      });
-      vectorStore = await createVectorStore(enrichedData);
-
+      await createVectorStoreFromExcel(workbook);
       res.json({
         message: "File processed and embeddings created",
         rows: enrichedData.length,
@@ -164,7 +189,7 @@ function getUserHistory(userId: string): ChatMessageHistory {
   return userHistories.get(userId)!;
 }
 
-app.post("/chat2", async (req, res) => {
+app.post("/chat", authenticate, async (req, res) => {
   try {
     if (!vectorStore)
       return res.status(400).json({ error: "No data uploaded yet" });
@@ -223,7 +248,7 @@ app.post("/chat2", async (req, res) => {
 
     res.json({ answer: response.response });
   } catch (err) {
-    console.error("Error in /chat2:", err);
+    console.error("Error in /chat:", err);
     res.status(500).json({ error: "Something went wrong" });
   }
 });
@@ -233,6 +258,7 @@ app.get("/", (req: Request, res: Response) => {
   res.send("Fetii Bot Backend Running 🚀");
 });
 
-app.listen(PORT, () => {
-  console.log(`Backend listening at http://localhost:${PORT}`);
+app.listen(PORT, async () => {
+  console.log(`Backend listening at ${BASE_URL}:${PORT}`);
+  await loadExcelOnStart();
 });
