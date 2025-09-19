@@ -228,6 +228,11 @@ app.post("/chat2", async (req, res) => {
   }
 });
 
+// Health check
+app.get("/", (req: Request, res: Response) => {
+  res.send("Fetii Bot Backend Running 🚀");
+});
+
 app.listen(PORT, () => {
   console.log(`Backend listening at http://localhost:${PORT}`);
 });
